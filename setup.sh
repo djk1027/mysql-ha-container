@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 프로젝트 루트로 이동
-cd "$(dirname "$0")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 echo "=============================="
 echo " 1. Checking environment"
@@ -11,13 +11,19 @@ bash scripts/check-env.sh
 echo
 
 echo "=============================="
-echo " 2. Starting MySQL containers"
+echo " 2. Setting up Python environment"
+echo "=============================="
+bash scripts/setup-python-env.sh
+echo
+
+echo "=============================="
+echo " 3. Starting MySQL containers"
 echo "=============================="
 docker compose up -d --wait
 echo
 
 echo "=============================="
-echo " 3. Configuring replication"
+echo " 4. Configuring replication"
 echo "=============================="
 bash scripts/setup-replication.sh
 echo

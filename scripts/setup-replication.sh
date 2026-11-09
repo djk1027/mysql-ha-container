@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-PRIMARY="mysql-primary"
-REPLICAS=("mysql-replica-1" "mysql-replica-2")
+PRIMARY="mysql-server-1"
+REPLICAS=("mysql-server-2" "mysql-server-3")
 
 # .env 파일 로드
 set -a

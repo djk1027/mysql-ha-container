@@ -91,10 +91,10 @@ docker compose ps
 ###########################
 # 7. 컨테이너 조작 
 ###########################
-docker exec -it mysql-primary mysql -uroot -p
+docker exec -it mysql-server-1 mysql -uroot -p
 
 # Replica 1
-docker exec -it mysql-replica-1 mysql -uroot -p
+docker exec -it mysql-server-2 mysql -uroot -p
 
 # Replica 2
-docker exec -it mysql-replica-2 mysql -uroot -p
+docker exec -it mysql-server-3 mysql -uroot -p

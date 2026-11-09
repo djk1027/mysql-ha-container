@@ -3,7 +3,7 @@ name: mysql-ha-container
 services:
   mysql-primary:
     image: mysql:8.4
-    container_name: mysql-primary
+    container_name: mysql-server-1
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
@@ -28,7 +28,7 @@ services:
 
   mysql-replica-1:
     image: mysql:8.4
-    container_name: mysql-replica-1
+    container_name: mysql-server-2
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
@@ -54,7 +54,7 @@ services:
 
   mysql-replica-2:
     image: mysql:8.4
-    container_name: mysql-replica-2
+    container_name: mysql-server-3
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
