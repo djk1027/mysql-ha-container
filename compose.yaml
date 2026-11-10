@@ -7,10 +7,11 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+      MYSQL_INITDB_SKIP_TZINFO: "1"
     ports:
       - "127.0.0.1:3376:3306"
     volumes:
-      - primary-data:/var/lib/mysql
+      - mysql-server-1-data:/var/lib/mysql
     command:
       - --server-id=1
       - --log-bin=mysql-bin
@@ -32,10 +33,11 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+      MYSQL_INITDB_SKIP_TZINFO: "1"
     ports:
       - "127.0.0.1:3377:3306"
     volumes:
-      - replica1-data:/var/lib/mysql
+      - mysql-server-2-data:/var/lib/mysql
     command:
       - --server-id=2
       - --log-bin=mysql-bin
@@ -58,10 +60,11 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+      MYSQL_INITDB_SKIP_TZINFO: "1"
     ports:
       - "127.0.0.1:3378:3306"
     volumes:
-      - replica2-data:/var/lib/mysql
+      - mysql-server-3-data:/var/lib/mysql
     command:
       - --server-id=3
       - --log-bin=mysql-bin
@@ -79,6 +82,6 @@ services:
       retries: 30
 
 volumes:
-  primary-data:
-  replica1-data:
-  replica2-data:
+  mysql-server-1-data:
+  mysql-server-2-data:
+  mysql-server-3-data:

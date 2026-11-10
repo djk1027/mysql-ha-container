@@ -16,8 +16,6 @@ NODES = {
     "mysql-server-3": 3378,
 }
 
-# PRIMARY = "mysql-server-1"
-
 PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD")
 
 if not PASSWORD:
@@ -101,13 +99,13 @@ def main():
         if status["is_primary"]
     ]
 
-    if len(primaries) == 0:
-        raise RuntimeError("No primary candidate detected.")
+    #if len(primaries) == 0:
+    #    raise RuntimeError("No primary candidate detected.")
 
     if len(primaries) > 1:
         raise RuntimeError("Multiple primary candidates detected.")
 
-    PRIMARY = primaries[0]
+    PRIMARY = primaries[0] if primaries else None
 
     for node, status in statuses.items():
         replica = status["replica"]
