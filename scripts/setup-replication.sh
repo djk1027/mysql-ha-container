@@ -71,7 +71,7 @@ CHANGE REPLICATION SOURCE TO
 
 START REPLICA;
 
-SET GLOBAL super_read_only = ON;
+SET PERSIST super_read_only = ON;
 "
 
 done

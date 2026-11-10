@@ -8,11 +8,7 @@ from pathlib import Path
 import pymysql
 from dotenv import load_dotenv
 
-NODES = {
-    "mysql-server-1": 3376,
-    "mysql-server-2": 3377,
-    "mysql-server-3": 3378,
-}
+from apps.common import NODES
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -216,7 +212,7 @@ def fence_old_primary(old_primary, mode, candidates, timeout=30):
         # 1. Old Primary 신규 쓰기 차단
         execute(
             old_primary,
-            "SET GLOBAL super_read_only = ON"
+            "SET PERSIST super_read_only = ON"
         )
 
         # 2. 쓰기 차단 확인 및 최종 GTID 확보
@@ -497,8 +493,8 @@ def promote_new_primary(new_primary, old_primary, mode):
     execute(new_primary, "RESET REPLICA ALL")
 
     # 4. 쓰기 허용
-    execute(new_primary, "SET GLOBAL super_read_only = OFF")
-    execute(new_primary, "SET GLOBAL read_only = OFF")
+    execute(new_primary, "SET PERSIST super_read_only = OFF")
+    execute(new_primary, "SET PERSIST read_only = OFF")
 
     # 5. 최종 상태 검증
     result = one(
@@ -752,8 +748,8 @@ def failover():
     # 6. New Primary 승격
     # ---------------------------
     # RESET REPLICA ALL
-    # SET GLOBAL super_read_only=OFF
-    # SET GLOBAL read_only=OFF
+    # SET PERSIST super_read_only=OFF
+    # SET PERSIST read_only=OFF
     # 쓰기 가능 여부 확인
     print("\n[6/8] 새로운 Primary를 승격...")
     promote_new_primary(new_primary, old_primary, mode)
