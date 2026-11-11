@@ -1,6 +1,8 @@
 """수집기: 주기적으로 클러스터 상태를 모아 Store에 넣는다.
 
-- HA 판단은 기존 Monitor.tick()을 그대로 사용 (CLI 모니터와 같은 로직)
+- 읽기 전용: 클러스터를 변경하거나 Failover를 판단하지 않는다 (HA Manager의 역할)
+- 노드 상태/이상 검사는 apps.common (HA Manager와 같은 로직)
+- 이벤트는 HA Manager가 남긴 logs/events.jsonl 을 읽기만 한다 (apps.events)
 - CPU/Memory는 `docker stats` 한 번 호출로 전체 컨테이너를 수집
 - MySQL 지표는 SHOW GLOBAL STATUS
 - 어떤 수집이 실패해도 루프는 계속 돈다 (실패한 값만 None)
@@ -18,8 +20,8 @@ from pathlib import Path
 
 import pymysql
 
-from apps.common import NODES, execute
-from apps.monitor import QUERY_TIMEOUT, Monitor
+from apps import events
+from apps.common import NODES, QUERY_TIMEOUT, cluster_issues, collect, execute
 
 log = logging.getLogger("collector")
 
@@ -28,8 +30,9 @@ log = logging.getLogger("collector")
 _APPS_DIR = Path(__file__).resolve().parent.parent
 SERVER_CODE = [
     *sorted((_APPS_DIR / "web").glob("*.py")),
-    _APPS_DIR / "monitor.py",
+    _APPS_DIR / "state.py",
     _APPS_DIR / "common.py",
+    _APPS_DIR / "events.py",
 ]
 
 
@@ -163,6 +166,7 @@ def mysql_status(node):
     return values
 
 
+EVENTS_LIMIT = 200        # 화면으로 넘길 최근 이벤트 수
 PROCESS_LIMIT = 100       # 노드당 최대 세션 수 (화면/전송량 보호)
 SQL_TEXT_LIMIT = 4000     # SQL 원문 최대 길이 (넘으면 잘리고 info_truncated=True)
 SYSTEM_USERS = {"system user", "event_scheduler"}
@@ -206,13 +210,10 @@ def processlist(node):
 
 
 class Collector(threading.Thread):
-    def __init__(self, store, interval, threshold, cooldown, auto_failover):
+    def __init__(self, store, interval):
         super().__init__(name="collector", daemon=True)  # 메인 종료 시 함께 종료
         self.store = store
         self.interval = interval
-        self.monitor = Monitor(
-            threshold, cooldown, auto_failover, on_event=store.add_event
-        )
         self._prev_questions = {}   # QPS 계산용: node → (Questions, Uptime, time)
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._started_code_mtime = _code_mtime()
@@ -228,19 +229,14 @@ class Collector(threading.Thread):
             time.sleep(max(0, self.interval - (time.monotonic() - started)))
 
     def collect_once(self):
-        # docker stats(1~2초 소요)는 Monitor.tick()과 병렬로 실행
+        # docker stats(1~2초 소요)는 노드 상태 수집과 병렬로 실행
         stats_future = self._pool.submit(docker_stats)
 
-        try:
-            self.monitor.tick()
-        except Exception as exc:
-            log.exception("Monitor tick 실패")
-            self.store.add_event(logging.ERROR, f"감시 오류: {exc}")
+        statuses, containers = collect()
+        primary, issues = cluster_issues(statuses, containers)
 
         stats = stats_future.result()
-        statuses = self.monitor.last_statuses
-        containers = self.monitor.last_containers
-        issues = self.monitor.active_issues
+        self.store.set_events(events.recent(EVENTS_LIMIT))
 
         nodes = {}
         for node in NODES:
@@ -252,8 +248,7 @@ class Collector(threading.Thread):
         return {
             "ts": time.time(),
             "interval": self.interval,
-            "primary": self.monitor.primary,
-            "auto_failover": self.monitor.auto_failover,
+            "primary": primary,
             "code_changed": _code_mtime() > self._started_code_mtime,
             "issues": list(issues.values()),
             "nodes": nodes,

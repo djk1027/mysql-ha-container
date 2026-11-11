@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MySQL HA Dashboard</title>
+  <script>
+    // CSS 적용 전에 저장된 테마를 반영해 깜빡임 방지 (기본: dark)
+    try { if (localStorage.getItem("theme") === "light") document.documentElement.dataset.theme = "light"; } catch (e) {}
+  </script>
+  <!-- 웹폰트: 오프라인이면 시스템 폰트로 대체됨 -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -14,9 +22,20 @@
     </div>
     <div class="meta">
       <span class="pill" id="primary-pill">Primary: -</span>
-      <span class="pill" id="failover-pill">자동 Failover: -</span>
       <span class="pill" id="conn-pill"><i class="dot"></i><span>연결 중…</span></span>
       <span class="muted" id="updated">-</span>
+      <button type="button" class="icon-btn" id="theme-btn" title="라이트 모드로 전환" aria-label="라이트 모드로 전환">
+        <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+          </g>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button type="button" class="icon-btn" id="refresh-btn" title="새로고침" aria-label="새로고침">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
           <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor"
@@ -29,7 +48,7 @@
   <main>
     <section id="restart-banner" class="restart-banner hidden" role="alert">
       ⚠ 대시보드 서버 코드가 변경되었습니다. 서버를 재시작해야 화면이 올바르게 표시됩니다.
-      <span class="muted">(Ctrl+C 후 <code>python -m apps.web</code> 다시 실행)</span>
+      <span class="muted">(<code>./ha.sh restart web</code>)</span>
     </section>
 
     <section id="issues" class="issues hidden" aria-live="polite"></section>

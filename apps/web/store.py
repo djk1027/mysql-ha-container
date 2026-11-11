@@ -5,18 +5,16 @@
 """
 
 import threading
-import time
 from collections import deque
 
 HISTORY_SIZE = 720   # 5초 주기 기준 1시간
-EVENT_SIZE = 200
 
 
 class Store:
     def __init__(self):
         self._cond = threading.Condition()
         self._history = deque(maxlen=HISTORY_SIZE)
-        self._events = deque(maxlen=EVENT_SIZE)
+        self._events = []   # HA Manager 이벤트 (Collector가 매 주기 파일에서 읽어 넣음)
         self._latest = None
         self._seq = 0   # 스냅샷이 갱신될 때마다 증가 (SSE가 새 데이터 여부 판단)
 
@@ -29,13 +27,9 @@ class Store:
             self._history.append(_to_point(snapshot))
             self._cond.notify_all()
 
-    def add_event(self, level, message):
+    def set_events(self, events):
         with self._cond:
-            self._events.append({
-                "ts": time.time(),
-                "level": level,
-                "message": message,
-            })
+            self._events = list(events)
 
     # ---------- 읽기 (HTTP) ----------
     def latest(self):

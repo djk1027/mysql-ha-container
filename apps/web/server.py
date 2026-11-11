@@ -4,7 +4,7 @@
   GET /static/<file>    정적 파일 (화이트리스트)
   GET /api/cluster      최신 스냅샷
   GET /api/history      시계열 (최근 1시간)
-  GET /api/events       이벤트 로그
+  GET /api/events       이벤트 로그 (HA Manager)
   GET /api/stream       SSE 실시간 스트림
 """
 

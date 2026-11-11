@@ -43,7 +43,6 @@ function colorOf(node) {
 // ---------------------------------------------------------------- header
 function renderHeader(snap) {
   $("#primary-pill").textContent = `Primary: ${snap.primary ?? "식별 불가"}`;
-  $("#failover-pill").textContent = `자동 Failover: ${snap.auto_failover ? "ON" : "OFF"}`;
   renderFreshness();
 }
 
@@ -100,7 +99,8 @@ function gauge(name, pct, sub, title) {
   const level = pct == null ? "" : pct >= 90 ? "bad" : pct >= 70 ? "warn" : "ok";
   // 값이 아주 작아도 0이 아니면 링이 살짝 보이도록 최소 길이 부여
   const len = !pct ? 0 : Math.max(C * pct / 100, 2);
-  const label = pct == null ? "-" : pct < 1 ? pct.toFixed(2) : pct < 10 ? pct.toFixed(1) : Math.round(pct);
+  // 한 자릿수는 소수 1자리, 두 자릿수 이상은 정수
+  const label = pct == null ? "-" : pct < 9.95 ? pct.toFixed(1) : Math.round(pct);
 
   return `
     <div class="gauge ${level}" title="${esc(title)}">
@@ -164,7 +164,7 @@ function renderNodes(snap) {
         </div>
 
         <dl class="kv">
-          <dt>컨테이너</dt><dd>${container}</dd>
+          <dt>Status</dt><dd>${container}</dd>
           <dt>read_only / super</dt><dd>${n.read_only ?? "-"} / ${n.super_read_only ?? "-"}</dd>
           <dt>Uptime</dt><dd>${uptimeStr(n.uptime)}</dd>
           ${replicaRows}
@@ -359,4 +359,24 @@ async function init() {
   });
 }
 
+// ---------------------------------------------------------------- theme
+// 기본은 다크. 라이트로 바꾸면 <html data-theme="light"> + localStorage 에 저장
+function initTheme() {
+  const btn = $("#theme-btn");
+  const sync = () => {
+    const label = document.documentElement.dataset.theme === "light" ? "다크 모드로 전환" : "라이트 모드로 전환";
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  };
+  btn.addEventListener("click", () => {
+    const light = document.documentElement.dataset.theme !== "light";
+    if (light) document.documentElement.dataset.theme = "light";
+    else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem("theme", light ? "light" : "dark"); } catch (e) { /* 저장 불가 환경 무시 */ }
+    sync();
+  });
+  sync();
+}
+
+initTheme();
 init();
