@@ -1,52 +1,10 @@
 #!/usr/bin/env python3
 
-import os
 import sys
 import pymysql
 
-from pathlib import Path
-from dotenv import load_dotenv
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
-
-NODES = {
-    "mysql-server-1": 3376,
-    "mysql-server-2": 3377,
-    "mysql-server-3": 3378,
-}
-
-PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD")
-
-if not PASSWORD:
-    print("[ERROR] MYSQL_ROOT_PASSWORD is required.")
-    sys.exit(1)
-
-
-def query(node, sql, params=None):
-    conn = pymysql.connect(
-        host="127.0.0.1",
-        port=NODES[node],
-        user="root",
-        password=PASSWORD,
-        connect_timeout=3,
-        read_timeout=5,
-        autocommit=True,
-        cursorclass=pymysql.cursors.DictCursor,
-    )
-
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            return cursor.fetchall()
-    finally:
-        conn.close()
-
-
-def one(node, sql, params=None):
-    rows = query(node, sql, params)
-    return rows[0] if rows else None
-
+from apps.common import one
+from apps.common import NODES
 
 def get_node_status(node):
     variables = one(node, """

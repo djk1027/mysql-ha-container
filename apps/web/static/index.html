@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MySQL HA Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <h1>MySQL HA</h1>
+    </div>
+    <div class="meta">
+      <span class="pill" id="primary-pill">Primary: -</span>
+      <span class="pill" id="failover-pill">자동 Failover: -</span>
+      <span class="pill" id="conn-pill"><i class="dot"></i><span>연결 중…</span></span>
+      <span class="muted" id="updated">-</span>
+      <button type="button" class="icon-btn" id="refresh-btn" title="새로고침" aria-label="새로고침">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section id="restart-banner" class="restart-banner hidden" role="alert">
+      ⚠ 대시보드 서버 코드가 변경되었습니다. 서버를 재시작해야 화면이 올바르게 표시됩니다.
+      <span class="muted">(Ctrl+C 후 <code>python -m apps.web</code> 다시 실행)</span>
+    </section>
+
+    <section id="issues" class="issues hidden" aria-live="polite"></section>
+
+    <section class="nodes" id="nodes"></section>
+
+    <section class="charts">
+      <div class="chart-card">
+        <div class="chart-head"><h2>CPU</h2><span class="muted">% (할당 CPU 대비)</span></div>
+        <div class="chart" id="chart-cpu"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head"><h2>Memory</h2><span class="muted">% (mem_limit 대비)</span></div>
+        <div class="chart" id="chart-mem"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head"><h2>QPS</h2><span class="muted">queries / sec</span></div>
+        <div class="chart" id="chart-qps"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head"><h2>Connections</h2><span class="muted">Threads_connected</span></div>
+        <div class="chart" id="chart-conn"></div>
+      </div>
+    </section>
+
+    <section class="events-card">
+      <div class="chart-head">
+        <h2>실행 중인 SQL <span class="muted" id="proc-count"></span></h2>
+        <div class="proc-filters">
+          <label>노드
+            <select id="proc-node"><option value="">All</option></select>
+          </label>
+          <label><input type="checkbox" id="proc-sleep"> Sleep 포함</label>
+          <label><input type="checkbox" id="proc-system"> 시스템 스레드 포함</label>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="proc" id="proc-table">
+          <colgroup id="proc-cols"></colgroup>
+          <thead><tr id="proc-head"></tr></thead>
+          <tbody id="proc-body"><tr><td colspan="9" class="muted">데이터 수집 중…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="events-card">
+      <div class="chart-head"><h2>이벤트</h2><span class="muted">최근 50건</span></div>
+      <ol class="events" id="events"><li class="muted">이벤트 없음</li></ol>
+    </section>
+  </main>
+
+  <dialog id="sql-dialog" class="sql-dialog" aria-labelledby="sql-dialog-title">
+    <div class="dialog-body">
+    <div class="dialog-head">
+      <h2 id="sql-dialog-title">SQL 상세</h2>
+      <button type="button" class="icon-btn" data-action="close" aria-label="닫기">✕</button>
+    </div>
+    <dl class="dialog-meta" id="sql-meta"></dl>
+    <p class="dialog-note" id="sql-note" hidden></p>
+    <pre class="dialog-sql" id="sql-text"></pre>
+    <div class="dialog-actions">
+      <span class="muted" id="sql-copied"></span>
+      <button type="button" class="btn" data-action="copy">복사</button>
+      <button type="button" class="btn primary" data-action="close">닫기</button>
+    </div>
+    </div>
+  </dialog>
+
+  <script src="/static/processlist.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

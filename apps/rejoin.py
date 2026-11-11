@@ -1,27 +1,15 @@
 
 import argparse
 import json
-import os
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 import pymysql
-from dotenv import load_dotenv
 
-from apps.common import NODES
-from apps.failover import one, execute, get_node_status
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-COMPOSE_FILE = PROJECT_ROOT / "compose.yaml"
-
-load_dotenv(PROJECT_ROOT / ".env")
-
-ROOT_PASSWORD = os.environ["MYSQL_ROOT_PASSWORD"]
-REPL_PASSWORD = os.environ["MYSQL_REPL_PASSWORD"]
-
+from apps.common import one, execute, get_node_status, REPL_PASSWORD
+from apps.common import NODES, PROJECT_ROOT, COMPOSE_FILE
 
 def docker(*args):
     """Docker 명령을 실행하고 결과를 반환한다."""
@@ -106,7 +94,7 @@ def start_read_only(node):
         mode="w",
         suffix=".json",
         prefix=".rejoin-",
-        dir=ROOT,
+        dir=PROJECT_ROOT,
         encoding="utf-8",
         delete=False
     ) as f:
@@ -142,6 +130,9 @@ def start_read_only(node):
 
     if status["read_only"] != 1 or status["super_read_only"] != 1:
         raise RuntimeError(f"{node}: Read-only startup failed.")
+    
+    # 10. 재시작 후에도 읽기 전용 유지
+    execute(node, "SET PERSIST super_read_only = ON")
 
     print(f"    [OK] Started safely: {node}")
 
@@ -159,6 +150,9 @@ def validate_gtid(node, primary):
         primary, "SELECT @@GLOBAL.gtid_executed AS gtid"
     )["gtid"]
 
+
+    # old_gtid(node)에 포함되어 있지만,
+    # new_gtid(primary)에는 포함되어 있지 않은 GTID들만 추출하여 반환
     result = one(
         node,
         "SELECT GTID_SUBTRACT(%s, %s) AS errant",
@@ -198,7 +192,7 @@ def configure_replication(node, primary):
         (
             primary,
             "repl",
-            os.environ["REPL_PASSWORD"]
+            REPL_PASSWORD
         )
     )
 
@@ -251,9 +245,10 @@ def verify_rejoin(node, primary, target_gtid, timeout=30):
     print(f"    [OK] Replication synchronized: {node}")
 
 
-def restore_compose(node, service, primary):
-    """원래 Compose 설정으로 재생성하고 복제 상태를 재검증한다."""
+def restore_compose_settings(node, service):
+    """임시 기동 옵션을 제거하고 원래 Compose 설정으로 복원한다."""
 
+    # 1. 원본 compose.yaml 설정으로 컨테이너 재생성
     docker(
         "compose",
         "-f", str(COMPOSE_FILE),
@@ -265,6 +260,7 @@ def restore_compose(node, service, primary):
         service
     )
 
+    # 2. 재기동 후 읽기 전용 상태 확인
     status = one(
         node,
         """
@@ -277,13 +273,7 @@ def restore_compose(node, service, primary):
     if status["read_only"] != 1 or status["super_read_only"] != 1:
         raise RuntimeError("Read-only setting was not preserved.")
 
-    target_gtid = one(
-        primary, "SELECT @@GLOBAL.gtid_executed AS gtid"
-    )["gtid"]
-
-    verify_rejoin(node, primary, target_gtid)
-
-    print("    [OK] Original Compose configuration restored.")
+    print(f"    [OK] Compose settings restored: {node}")
 
 ###########################
 #   Main Rejoin Logic
@@ -292,6 +282,9 @@ def rejoin(node):
     if node not in NODES:
         raise RuntimeError(f"Unknown node: {node}")
 
+    # ---------------------------
+    # 1. Primary 탐색
+    # ---------------------------
     print("[1/6] 현재 Primary를 탐색합니다...")
     primary = find_primary()
     print(f"    [INFO] Primary: {primary}")
@@ -299,20 +292,35 @@ def rejoin(node):
     if node == primary:
         raise RuntimeError("Cannot rejoin the current Primary.")
 
-    print("[2/6] Old Primary를 기동합니다...")
+    # ---------------------------
+    # 2. 임시 읽기 전용 기동
+    # ---------------------------
+    print("[2/6] Old Primary를 Read only로 기동합니다...")
     service = start_read_only(node)
-
+    
+    # ---------------------------
+    # 3. GTID 검증
+    # ---------------------------
     print("[3/6] GTID를 검증합니다...")
     target_gtid = validate_gtid(node, primary)
 
-    print("[4/6] Replica 복제를 재구성합니다...")
+    # ---------------------------
+    # 4. 원래 Compose 설정으로 복원
+    # ---------------------------
+    print("[4/6] 기본 Compose 설정을 복원합니다...")
+    restore_compose_settings(node, service)
+    
+    # ---------------------------
+    # 5. DB 복제 재구성
+    # ---------------------------
+    print("[5/6] Replica 복제를 재구성합니다...")
     configure_replication(node, primary)
 
-    print("[5/6] 복제 동기화를 확인합니다...")
+    # ---------------------------
+    # 6. 복제 검증
+    # ---------------------------
+    print("[6/6] 복제 동기화를 확인합니다...")
     verify_rejoin(node, primary, target_gtid)
-
-    print("[6/6] 기본 Compose 설정을 복원합니다...")
-    restore_compose(node, service, primary)
 
     print(f"\n[OK] Rejoin completed: {node} -> {primary}")
 

@@ -1,9 +1,11 @@
 name: mysql-ha-container
 
 services:
-  mysql-primary:
+  mysql-server-1:
     image: mysql:8.4
     container_name: mysql-server-1
+    cpus: 2
+    mem_limit: 1g
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
@@ -15,6 +17,7 @@ services:
     command:
       - --server-id=1
       - --log-bin=mysql-bin
+      - --relay-log=relay-bin
       - --binlog-format=ROW
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
@@ -27,9 +30,11 @@ services:
       timeout: 5s
       retries: 30
 
-  mysql-replica-1:
+  mysql-server-2:
     image: mysql:8.4
     container_name: mysql-server-2
+    cpus: 2
+    mem_limit: 1g
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
@@ -54,9 +59,11 @@ services:
       timeout: 5s
       retries: 30
 
-  mysql-replica-2:
+  mysql-server-3:
     image: mysql:8.4
     container_name: mysql-server-3
+    cpus: 2
+    mem_limit: 1g
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
