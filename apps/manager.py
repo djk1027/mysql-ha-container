@@ -68,6 +68,9 @@ class Manager:
         self.last_failover = 0.0      # 마지막 Failover 시도 시각 (monotonic, 쿨다운 기준)
         self.stop_event = threading.Event()
 
+        self.rejoin_thread = None
+        self.rejoin_result = None     # ("ok" | "fail", node, 메시지)
+    
     # ---------- 알림 ----------
     def emit(self, level, message):
         """알림 지점: 로그 + 이벤트 파일."""
@@ -87,24 +90,59 @@ class Manager:
 
         self.active_issues = issues
 
+    # ---------- rejoin thread ----------
+    def start_rejoin(self, node, new_primary):
+        if self.rejoin_thread and self.rejoin_thread.is_alive():
+            self.emit(logging.WARNING, f"Rejoin 이미 진행 중: {node} 요청 건너뜀")
+            return
+
+        def worker():
+            from apps.rejoin import rejoin
+            try:
+                rejoin(node)
+                self.rejoin_result = ("ok", node, f"Rejoin 완료: {node} -> {new_primary}")
+            except Exception as exc:          # 스레드 밖으로 전달되지 않으므로 여기서 잡는다
+                self.rejoin_result = ("fail", node,
+                                      f"Rejoin 실패: {node} - {exc}. 수동 재합류가 필요합니다. "
+                                      f"python -m apps.rejoin --node {node}")
+
+        self.rejoin_result = None
+        self.rejoin_thread = threading.Thread(target=worker, name=f"rejoin-{node}")
+        self.rejoin_thread.start()            # join 하지 않고 바로 반환
+        self.emit(logging.INFO, f"Rejoin 시작: {node} -> {new_primary}")
+
+    def check_rejoin(self):
+        """tick 마다 호출: 끝났으면 결과만 처리 (기다리지 않음)"""
+        t = self.rejoin_thread
+        if t is None or t.is_alive():
+            return
+        t.join()                              # 이미 끝났으므로 즉시 반환
+        status, node, msg = self.rejoin_result
+        self.emit(logging.INFO if status == "ok" else logging.WARNING, msg)
+        self.rejoin_thread = None
+
     # ---------- 감시 ----------
     def tick(self):
         statuses, containers = collect()
         primary, issues = cluster_issues(statuses, containers)
         self.report(issues)
 
+        # Primary를 식별할 수 없으면 판정하지 않음
+        # 1) split-brain
+        # 2) 식별 불가
         if primary is None:
-            # split-brain / Primary 식별 불가: 자동 조치하지 않는다
             self.primary_failures = 0
             return
 
+        # primary가 변경되었으면 기록하고 다시 셈
         if primary != self.primary:
             if self.primary is not None:
                 self.emit(logging.WARNING, f"Primary 변경됨: {self.primary} -> {primary}")
             self.primary = primary
             self.primary_failures = 0
 
-        # Primary 장애 판정
+        # Primary에 접속되면 정상
+        # (statuses에는 접속에 성공한 노드만 들어 있음)
         if primary in statuses:
             self.primary_failures = 0
             return
@@ -123,12 +161,11 @@ class Manager:
 
         self.handle_primary_down(primary, reason)
 
-    def handle_primary_down(self, primary, reason):
+    def handle_primary_down(self, old_primary, reason):
         if not self.auto_failover:
-            # 같은 장애로 매 주기 알림이 쏟아지지 않도록 한 번만
-            if self.primary_failures == self.threshold:
+            if self.primary_failures >= self.threshold:
                 self.emit(logging.CRITICAL,
-                          f"PRIMARY 장애: {primary} ({reason}). "
+                          f"PRIMARY 장애: {old_primary} ({reason}). "
                           "수동 실행 필요: python -m apps.failover")
             return
 
@@ -137,20 +174,37 @@ class Manager:
             log.warning("Failover 쿨다운 중: %.0f초 남음", remaining)
             return
 
-        self.emit(logging.CRITICAL, f"PRIMARY 장애: {primary} ({reason}). Failover를 시작합니다...")
+        self.emit(logging.CRITICAL, f"PRIMARY 장애: {old_primary} ({reason}). Failover를 시작합니다...")
         self.last_failover = time.monotonic()
 
-        from apps.failover import failover  # 필요할 때만 로드
-
+        from apps.failover import failover
+        
+        #-----------------
+        # 1. Failover 실행
+        #-----------------
         try:
-            failover()
+            new_primary = failover()
+
         except Exception as exc:
-            self.emit(logging.CRITICAL, f"Failover 실패: {exc}. 수동 조치가 필요합니다.")
+            self.emit(
+                logging.CRITICAL,
+                f"Failover 실패: {exc}. 수동 조치가 필요합니다."
+            )
             return
 
-        self.emit(logging.WARNING,
-                  f"Failover 완료. Old Primary {primary}는 격리됨. "
-                  f"재합류: python -m apps.rejoin --node {primary}")
+        self.emit(
+            logging.WARNING,
+            f"Failover 완료: New Primary = {new_primary}, "
+            f"Old Primary = {old_primary}"
+        )
+
+        #-----------------
+        # 2. 기존 Primary 재합류 (백그라운드 스레드)
+        #-----------------
+        # start_rejoin()은 스레드를 시작만 하고 바로 반환한다.
+        # 완료/실패 결과는 다음 tick부터 check_rejoin()이 기록한다.
+        self.start_rejoin(old_primary, new_primary)
+
         self.primary_failures = 0
 
     def request_stop(self, signum, _frame):
@@ -171,14 +225,23 @@ class Manager:
                  ", ".join(NODES), self.interval, self.threshold, self.auto_failover)
         self.emit(logging.INFO,
                   f"HA Manager 시작 (자동 Failover {'ON' if self.auto_failover else 'OFF'})")
+        
         while not self.stop_event.is_set():
             started = time.monotonic()
             try:
+                self.check_rejoin()
                 self.tick()
             except Exception as exc:  # 감시 루프는 절대 죽지 않게
                 log.exception("감시 중 오류 발생: %s", exc)
             # 대기 중에 종료 요청이 오면 바로 깨어남
             self.stop_event.wait(max(0, self.interval - (time.monotonic() - started)))
+        
+        # 종료시 진행 중인 rejoin을 기다림
+        if self.rejoin_thread:
+            log.info("진행 중인 Rejoin 완료 대기...")
+            self.rejoin_thread.join()
+            self.check_rejoin()
+
         self.emit(logging.INFO, "HA Manager 종료")
 
 
@@ -186,17 +249,11 @@ def main():
     parser = argparse.ArgumentParser(description="MySQL HA Manager (감시 + Failover)")
 
     parser.add_argument("--interval", type=float, default=5, help="감시 주기(초)")
-
-    parser.add_argument("--threshold", type=int, default=3,
-                        help="Primary 장애 확정까지 연속 실패 횟수")
-
-    parser.add_argument("--cooldown", type=float, default=300,
-                        help="자동 Failover 후 재시도 금지 시간(초)")
-
-    parser.add_argument("--auto-failover", action="store_true",
-                        help="Primary 장애 확정 시 자동으로 Failover 수행")
-
+    parser.add_argument("--threshold", type=int, default=3, help="Primary 장애 확정까지 연속 실패 횟수")
+    parser.add_argument("--cooldown", type=float, default=60, help="자동 Failover 후 재시도 금지 시간(초)")
+    parser.add_argument("--auto-failover", action="store_true", help="Primary 장애 확정 시 자동으로 Failover 수행")
     parser.add_argument("--once", action="store_true", help="한 번만 검사하고 종료")
+
     args = parser.parse_args()
 
     logging.basicConfig(

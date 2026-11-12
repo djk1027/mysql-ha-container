@@ -15,8 +15,9 @@ docker stop mysql-server-2 && .venv/bin/python -m apps.check_cluster
 ./ha.sh restart web
 ./ha.sh stop               # manager는 진행 중인 Failover를 마치고 종료
 
-# 실행 옵션은 환경 변수로 지정 (없으면 manager는 감시+알림만)
-MANAGER_OPTS="--auto-failover" ./ha.sh start manager
+# 실행 옵션은 환경 변수로 지정 (기본: manager는 --auto-failover)
+MANAGER_OPTS="" ./ha.sh start manager                                   # 감시+알림만 (자동 Failover 끔)
+MANAGER_OPTS="--auto-failover --threshold 5" ./ha.sh start manager    # 옵션 변경
 
 # 포그라운드 실행 (디버깅용, 종료: Ctrl+C)
 .venv/bin/python -m apps.manager --auto-failover   # HA Manager: 하나만 실행할 것

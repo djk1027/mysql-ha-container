@@ -21,7 +21,10 @@ from pathlib import Path
 import pymysql
 
 from apps import events
-from apps.common import NODES, QUERY_TIMEOUT, cluster_issues, collect, execute
+from apps.common import (
+    NODES, QUERY_TIMEOUT, Role, cluster_issues, collect, execute, find_primary,
+    node_state, parse_issue_key,
+)
 
 log = logging.getLogger("collector")
 
@@ -38,6 +41,18 @@ SERVER_CODE = [
 
 def _code_mtime():
     return max((f.stat().st_mtime for f in SERVER_CODE if f.exists()), default=0)
+
+
+def _alert(key, message, candidates):
+    """대시보드 상단 알림 1건. 노드별 이슈는 해당 노드, 클러스터 전체 이슈(split, primary)는 관련 노드(Primary 후보)"""
+    kind, node = parse_issue_key(key)
+    if node:
+        nodes = [node]
+        if message.startswith(f"{node}: "):
+            message = message[len(node) + 2:]   # 인스턴스는 별도 칸에 표시하므로 앞의 "node: " 제거
+    else:
+        nodes = candidates or list(NODES)       # 후보가 없으면(전체 장애) 모든 노드
+    return {"level": kind.severity, "nodes": nodes, "message": message}
 
 _UNITS = {
     "b": 1, "kb": 1000, "mb": 1000**2, "gb": 1000**3, "tb": 1000**4,
@@ -217,6 +232,7 @@ class Collector(threading.Thread):
         self._prev_questions = {}   # QPS 계산용: node → (Questions, Uptime, time)
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._started_code_mtime = _code_mtime()
+        self._alert_since = {}      # 이슈 key → 처음 감지된 시각. 해소되면 삭제 (서버 재시작 시 초기화)
 
     def run(self):
         log.info("수집 시작 (주기=%s초)", self.interval)
@@ -235,6 +251,9 @@ class Collector(threading.Thread):
         statuses, containers = collect()
         primary, issues = cluster_issues(statuses, containers)
 
+        now = time.time()
+        self._alert_since = {k: self._alert_since.get(k, now) for k in issues}
+
         stats = stats_future.result()
         self.store.set_events(events.recent(EVENTS_LIMIT))
 
@@ -244,13 +263,18 @@ class Collector(threading.Thread):
                 node, statuses.get(node), containers.get(node),
                 stats.get(node, {}), issues,
             )
+            nodes[node]["state"] = node_state(node, statuses, containers, issues)
 
         return {
-            "ts": time.time(),
+            "ts": now,
             "interval": self.interval,
             "primary": primary,
             "code_changed": _code_mtime() > self._started_code_mtime,
             "issues": list(issues.values()),
+            "alerts": [
+                {**_alert(k, m, find_primary(statuses)), "since": self._alert_since[k]}
+                for k, m in issues.items()
+            ],
             "nodes": nodes,
         }
 
@@ -282,7 +306,7 @@ class Collector(threading.Thread):
             self._prev_questions.pop(node, None)
             return snap
 
-        snap["role"] = "PRIMARY" if status["is_primary"] else "REPLICA"
+        snap["role"] = Role.PRIMARY if status["is_primary"] else Role.REPLICA
         snap["read_only"] = status["read_only"]
         snap["super_read_only"] = status["super_read_only"]
 

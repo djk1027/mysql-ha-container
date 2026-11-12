@@ -1,4 +1,5 @@
 import json
+from enum import StrEnum
 from pathlib import Path
 
 import os
@@ -19,6 +20,71 @@ REPL_PASSWORD = os.environ["MYSQL_REPL_PASSWORD"]
 
 with open(CONFIG_FILE, encoding="utf-8") as f:
     NODES = json.load(f)
+
+
+#-------------------
+# Enums
+#-------------------
+# StrEnum: 값이 문자열이라 로그/JSON에 그대로 읽히는 이름으로 남고, 기존 문자열과도 == 비교된다
+class Role(StrEnum):
+    """노드 역할"""
+    PRIMARY = "PRIMARY"
+    REPLICA = "REPLICA"
+
+
+class NodeState(StrEnum):
+    """노드 상태. 저장하지 않고 매 수집마다 node_state()로 계산한다"""
+    OK = "OK"                     # 정상
+    DEGRADED = "DEGRADED"         # 서비스는 되지만 확인 필요 (지연, 설정 이상 등)
+    REPL_BROKEN = "REPL_BROKEN"   # 접속은 되지만 복제가 중단/미구성
+    DOWN = "DOWN"                 # MySQL 접속 불가 (컨테이너 실행 중 또는 확인 불가)
+    STOPPED = "STOPPED"           # 컨테이너 중지됨 (Fencing 포함)
+
+
+class Severity(StrEnum):
+    """알림 심각도"""
+    WARNING = "WARNING"     # 서비스는 되지만 확인 필요
+    CRITICAL = "CRITICAL"   # 서비스(쓰기) 불가, 노드 다운, 복제 중단 → 즉시 조치 필요
+
+
+class Mode(StrEnum):
+    """Primary 전환 모드"""
+    SWITCHOVER = "switchover"   # 기존 Primary 정상: 쓰기 차단 후 계획 전환
+    FAILOVER = "failover"       # 기존 Primary 장애: 격리(컨테이너 중지) 후 전환
+
+
+class IssueKind(StrEnum):
+    """이상 종류. 이슈 key는 노드별이면 '<종류>:<node>', 클러스터 전체면 '<종류>'"""
+    SPLIT_BRAIN = "split"         # 쓰기 가능한 노드가 여러 개
+    NO_PRIMARY = "primary"        # Primary 식별 불가
+    PRIMARY_READ_ONLY = "ro"      # Primary 접속은 되지만 쓰기 불가
+    DOWN = "down"                 # MySQL 접속 불가
+    REPLICA_WRITABLE = "writable" # Replica가 쓰기 가능
+    NO_REPLICATION = "norepl"     # 복제 미구성
+    WRONG_SOURCE = "source"       # 복제 Source가 현재 Primary가 아님
+    IO_STOPPED = "io"             # IO Thread 비정상
+    SQL_STOPPED = "sql"           # SQL Thread 비정상
+    LAG = "lag"                   # GTID 지연
+
+    @property
+    def severity(self):
+        return Severity.CRITICAL if self in _CRITICAL_ISSUES else Severity.WARNING
+
+
+_CRITICAL_ISSUES = {
+    IssueKind.SPLIT_BRAIN, IssueKind.NO_PRIMARY, IssueKind.PRIMARY_READ_ONLY,
+    IssueKind.DOWN, IssueKind.IO_STOPPED, IssueKind.SQL_STOPPED,
+}
+
+
+def issue_key(kind, node=None):
+    return f"{kind}:{node}" if node else str(kind)
+
+
+def parse_issue_key(key):
+    """'io:mysql-server-2' → (IssueKind.IO_STOPPED, 'mysql-server-2'), 'split' → (IssueKind.SPLIT_BRAIN, None)"""
+    kind, _, node = key.partition(":")
+    return IssueKind(kind), node or None
 
 #-------------------
 # Container function
@@ -113,12 +179,25 @@ def get_node_status(node, read_timeout=45):
     }
 
 
-QUERY_TIMEOUT = 3
-
 
 #-------------------
 # Cluster health (읽기 전용: Manager / 웹 대시보드 공용)
 #-------------------
+QUERY_TIMEOUT = 3
+_REPL_BROKEN_ISSUES = {IssueKind.IO_STOPPED, IssueKind.SQL_STOPPED, IssueKind.NO_REPLICATION}
+
+def node_state(node, statuses, containers, issues):
+    """수집 결과(collect, cluster_issues)로 노드 상태를 계산한다."""
+    if node not in statuses:
+        return NodeState.STOPPED if containers.get(node) is False else NodeState.DOWN
+
+    kinds = {kind for kind, n in map(parse_issue_key, issues) if n == node}
+    if kinds & _REPL_BROKEN_ISSUES:
+        return NodeState.REPL_BROKEN
+    if kinds:
+        return NodeState.DEGRADED
+    return NodeState.OK
+
 def container_running(node):
     """컨테이너 실행 여부. docker 조회 자체가 실패하면 None(판단 불가)."""
     try:
@@ -165,54 +244,54 @@ def cluster_issues(statuses, containers):
 
     # Split-brain: 쓰기 가능한 노드가 2개 이상
     if len([n for n in primaries if statuses.get(n, {}).get("is_primary")]) > 1:
-        return None, {"split": f"SPLIT-BRAIN: 쓰기 가능한 노드가 여러 개 {primaries}"}
+        return None, {issue_key(IssueKind.SPLIT_BRAIN): f"SPLIT-BRAIN: 쓰기 가능한 노드가 여러 개 {primaries}"}
 
     if len(primaries) != 1:
         # 전체 장애이거나 Replica들의 Source가 엇갈림
-        return None, {"primary": f"Primary를 식별할 수 없음 (후보: {primaries})"}
+        return None, {issue_key(IssueKind.NO_PRIMARY): f"Primary를 식별할 수 없음 (후보: {primaries})"}
 
     primary = primaries[0]
     return primary, check_issues(statuses, containers, primary)
 
 
 def check_issues(statuses, containers, primary):
-    """현재 발견된 이상 목록을 {key: message} 형태로 반환한다. 노드별 key는 '<종류>:<node>'."""
+    """현재 발견된 이상 목록을 {key: message} 형태로 반환한다. key 형식은 issue_key() 참고."""
     issues = {}
 
     for node in NODES:
         if node not in statuses:
             state = {True: "실행 중", False: "중지됨", None: "확인 불가"}[containers[node]]
-            issues[f"down:{node}"] = f"{node}: MySQL 접속 불가 (컨테이너 {state})"
+            issues[issue_key(IssueKind.DOWN, node)] = f"{node}: MySQL 접속 불가 (컨테이너 {state})"
 
     for node, s in statuses.items():
         if node == primary:
             if not s["is_primary"]:
-                issues[f"ro:{node}"] = f"{node}: Primary 접속은 되지만 쓰기 불가 상태"
+                issues[issue_key(IssueKind.PRIMARY_READ_ONLY, node)] = f"{node}: Primary 접속은 되지만 쓰기 불가 상태"
             continue
 
         replica = s["replica"]
 
         if not s["super_read_only"] and not s["is_primary"]:
-            issues[f"writable:{node}"] = f"{node}: Replica가 쓰기 가능 상태"
+            issues[issue_key(IssueKind.REPLICA_WRITABLE, node)] = f"{node}: Replica가 쓰기 가능 상태"
 
         if replica is None:
             if not s["is_primary"]:
-                issues[f"norepl:{node}"] = f"{node}: 복제가 구성되지 않음"
+                issues[issue_key(IssueKind.NO_REPLICATION, node)] = f"{node}: 복제가 구성되지 않음"
             continue
 
         if replica["Source_Host"] != primary:
-            issues[f"source:{node}"] = (
+            issues[issue_key(IssueKind.WRONG_SOURCE, node)] = (
                 f"{node}: 복제 Source가 {replica['Source_Host']} (예상: {primary})"
             )
 
         if replica["Replica_IO_Running"] != "Yes":
-            issues[f"io:{node}"] = (
+            issues[issue_key(IssueKind.IO_STOPPED, node)] = (
                 f"{node}: IO Thread 비정상 ({replica['Replica_IO_Running']})"
                 f" {replica['Last_IO_Error'] or ''}".rstrip()
             )
 
         if replica["Replica_SQL_Running"] != "Yes":
-            issues[f"sql:{node}"] = (
+            issues[issue_key(IssueKind.SQL_STOPPED, node)] = (
                 f"{node}: SQL Thread 비정상 ({replica['Replica_SQL_Running']})"
                 f" {replica['Last_SQL_Error'] or ''}".rstrip()
             )
@@ -229,6 +308,6 @@ def check_issues(statuses, containers, primary):
             except pymysql.MySQLError:
                 behind = None   # 수집 직후 노드가 끊긴 경우. 다음 주기에 다시 확인
             if behind:
-                issues[f"lag:{node}"] = f"{node}: Primary보다 GTID 지연 {behind}"
+                issues[issue_key(IssueKind.LAG, node)] = f"{node}: Primary보다 GTID 지연 {behind}"
 
     return issues

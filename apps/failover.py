@@ -2,11 +2,8 @@ import time
 import pymysql
 
 from apps.common import one, execute, REPL_PASSWORD
-from apps.common import NODES, check_container, stop_container, get_node_status
+from apps.common import NODES, Mode, check_container, stop_container, get_node_status, find_primary
 
-#-------------------
-# Business function
-#-------------------
 # 1. Node들의 Status 세팅 
 def collect_node_statuses():
     """노드 상태 수집 및 기존 Primary, 전환 모드 판단"""
@@ -20,17 +17,20 @@ def collect_node_statuses():
             errors.append(f"{node}: Connection failed - {exc}")
             print(f"[WARN] {node}: unavailable")
 
-    # 1-1. Node들의 is_prmary 값 확인
-    primaries = [
-        node
-        for node, status in statuses.items()
-        if status["is_primary"]
-    ]
+    # 1-1. 기존 Primary 식별 (공통 로직: Manager/대시보드와 같은 기준)
+    #   쓰기 가능한 노드가 있으면 그 노드, 없으면 Replica들의 Source_Host 합의
+    primaries = find_primary(statuses)
 
     if len(primaries) > 1:
-        raise RuntimeError("Multiple primary candidates detected.")
+        raise RuntimeError(f"Multiple primary candidates detected: {primaries}")
 
-    # 1-2. Replica의 Source_Host로 기존 Primary 식별
+    if not primaries:
+        raise RuntimeError("Unable to identify the Primary.")
+
+    old_primary = primaries[0]
+
+    # 1-2. 전환 전 안전 검사 (failover 자체 판단: 수동 실행 시에도 적용)
+    #   접속 가능한 Replica가 모두 old_primary를 Source로 보고 있어야 한다
     sources = {
         status["replica"]["Source_Host"]
         for status in statuses.values()
@@ -38,27 +38,23 @@ def collect_node_statuses():
         and status["replica"]["Source_Host"]
     }
 
-    if len(sources) != 1:
+    if sources != {old_primary}:
         raise RuntimeError(
-            "Unable to uniquely identify the replication source."
+            f"Replication source mismatch: Primary={old_primary}, "
+            f"Replica sources={sorted(sources)}"
         )
 
-    old_primary = next(iter(sources))
-
     # 1-3. Switchover / Failover 판단
-    if len(primaries) == 1:
-        if primaries[0] != old_primary:
-            raise RuntimeError("Primary and replication source mismatch.")
+    if old_primary not in statuses:
+        mode = Mode.FAILOVER
 
-        mode = "switchover"
+    elif statuses[old_primary]["is_primary"]:
+        mode = Mode.SWITCHOVER
 
     else:
-        if old_primary in statuses:
-            raise RuntimeError(
-                "Old Primary is reachable but not writable."
-            )
-
-        mode = "failover"
+        raise RuntimeError(
+            "Old Primary is reachable but not writable."
+        )
 
     print(f"    [INFO] Mode        : {mode.upper()}")
     print(f"    [INFO] Old Primary : {old_primary}")
@@ -103,7 +99,7 @@ def fence_old_primary(old_primary, mode, candidates, timeout=30):
     final_gtid = None
 
     # Switchover: 정상적인 Primary 전환
-    if mode == "switchover":
+    if mode == Mode.SWITCHOVER:
         print(f"    [INFO] Blocking writes on {old_primary}...")
 
         # 1. Old Primary 신규 쓰기 차단
@@ -166,7 +162,7 @@ def fence_old_primary(old_primary, mode, candidates, timeout=30):
 
             print(f"    [OK] GTID synchronized: {node}")
 
-    elif mode == "failover":
+    elif mode == Mode.FAILOVER:
         # 4. Failover일 때 Old Primary 컨테이너 중지 및 검증
         stop_container(old_primary)
         print(f"    [OK] Old Primary fenced: {old_primary}")
@@ -327,7 +323,7 @@ def select_new_primary(snapshots, candidates, mode, old_primary_gtid=None):
     new_primary = latest[0]
 
     # 4. Switchover: 기존 Primary의 최종 GTID 검증
-    if mode == "switchover":
+    if mode == Mode.SWITCHOVER:
         if old_primary_gtid is None:
             raise RuntimeError("Old Primary GTID is missing.")
 
@@ -357,11 +353,11 @@ def promote_new_primary(new_primary, old_primary, mode):
     print(f"    [INFO] Promoting {new_primary}...")
 
     # 1. Old Primary Fencing 상태 재확인
-    if mode == "failover":
+    if mode == Mode.FAILOVER:
         if check_container(old_primary) != "false":
             raise RuntimeError("Old Primary is not fenced.")
 
-    elif mode == "switchover":
+    elif mode == Mode.SWITCHOVER:
         status = one(
             old_primary,
             "SELECT @@GLOBAL.super_read_only AS super_read_only"
@@ -420,7 +416,7 @@ def promote_new_primary(new_primary, old_primary, mode):
 # 7. 나머지 Replica 재구성
 def reconfigure_replicas(candidates, old_primary, new_primary, mode, timeout=30):
     """나머지 Replica의 Source를 새로운 Primary로 변경한다."""
-    if mode == "switchover":
+    if mode == Mode.SWITCHOVER:
         replicas = candidates + [old_primary]
     else:
         replicas = candidates
@@ -507,11 +503,11 @@ def verify_cluster(new_primary, old_primary, candidates, mode):
     """Failover 이후 HA 구성 상태를 검증한다."""
 
     # 1. Old Primary Fencing 확인
-    if mode == "failover":
+    if mode == Mode.FAILOVER:
         if check_container(old_primary) != "false":
             raise RuntimeError("Old Primary is not fenced.")
 
-    elif mode == "switchover":
+    elif mode == Mode.SWITCHOVER:
         status = one(
             old_primary,
             "SELECT @@GLOBAL.super_read_only AS super_read_only"
@@ -682,7 +678,8 @@ def failover():
     print("\n---------------------")
     print(f"{mode} completed!", )
     print("---------------------")
-    return
+    
+    return new_primary
 
 
 if __name__ == "__main__":

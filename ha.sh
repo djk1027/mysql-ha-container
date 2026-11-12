@@ -2,22 +2,30 @@
 # MySQL HA 서비스 백그라운드 기동/중지
 #   ./ha.sh {start|stop|restart|status} [manager|web|all]
 # 로그: logs/<서비스>.log
-# 실행 여부는 프로세스 명령줄(-m apps.manager / -m apps.web)로 찾는다 → 직접 띄운 것도 포함
+# 실행 여부는 프로세스 명령줄
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 PYTHON=.venv/bin/python
 
 # 실행 옵션 (환경 변수로 덮어쓸 수 있음)
-MANAGER_OPTS=${MANAGER_OPTS:-}      # 예: "--auto-failover --threshold 3 --cooldown 300"
-WEB_OPTS=${WEB_OPTS:-}              # 예: "--port 8000"
+# MANAGER_OPTS: 미지정 시 자동 Failover 사용. 빈 값("")을 주면 감시+알림만
+# (':-' 가 아닌 '-' 를 써야 빈 값으로 끌 수 있음)
 
-STOP_TIMEOUT=120   # manager는 진행 중인 Failover를 마치고 종료하므로 넉넉히
+# 예: "--auto-failover --threshold 3 --cooldown 60"
+MANAGER_OPTS=${MANAGER_OPTS-"--auto-failover"}
+
+# 예: "--port 8000"
+WEB_OPTS=${WEB_OPTS:-}
+
+# manager는 진행 중인 Failover를 마치고 종료하므로 넉넉히
+STOP_TIMEOUT=120
 
 module_of() { [[ $1 == manager ]] && echo apps.manager || echo apps.web; }
 opts_of()   { [[ $1 == manager ]] && echo "$MANAGER_OPTS" || echo "$WEB_OPTS"; }
 
-# 실행 중인 PID 목록 (공백 구분). 없으면 빈 문자열
+# 실행 중인 PID 목록
+# (-m apps.manager / -m apps.web)
 running_pid() {
     local mod
     mod=$(module_of "$1")
@@ -34,7 +42,8 @@ start_one() {
     nohup "$PYTHON" -u -m $(module_of "$svc") $(opts_of "$svc") >> "logs/$svc.log" 2>&1 < /dev/null &
     pid=$!
 
-    sleep 3   # 초기화(docker 조회, 포트 바인딩) 중 죽는지 확인
+    sleep 3
+    # 초기화(docker 조회, 포트 바인딩) 중 죽는지 확인
     if ! kill -0 "$pid" 2>/dev/null; then
         echo "$svc: 기동 실패 (logs/$svc.log 확인)"
         return 1
@@ -47,7 +56,7 @@ stop_one() {
     pid=$(running_pid "$svc")
     if [[ -z $pid ]]; then echo "$svc: 실행 중 아님"; return 0; fi
 
-    # shellcheck disable=SC2086  # PID가 여러 개일 수 있음
+    # shellcheck disable=SC2086
     kill -TERM $pid
     for ((i = 0; i < STOP_TIMEOUT; i++)); do
         if [[ -z $(running_pid "$svc") ]]; then

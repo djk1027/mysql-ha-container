@@ -4,7 +4,7 @@ import sys
 import pymysql
 
 from apps.common import one
-from apps.common import NODES
+from apps.common import NODES, Role, find_primary
 
 def get_node_status(node):
     variables = one(node, """
@@ -50,26 +50,22 @@ def main():
             errors.append(f"{node}: Connection failed - {exc}")
             print(f"[{node}]: unavailable")
 
-    # Primary validation check
-    primaries = [
-        node
-        for node, status in statuses.items()
-        if status["is_primary"]
-    ]
+    # Primary 식별 (공통 로직: 쓰기 가능한 노드, 없으면 Replica들의 Source_Host 합의)
+    primaries = find_primary(statuses)
 
-    #if len(primaries) == 0:
-    #    raise RuntimeError("No primary candidate detected.")
+    if len([n for n in primaries if statuses.get(n, {}).get("is_primary")]) > 1:
+        raise RuntimeError(f"Multiple primary candidates detected: {primaries}")
 
-    if len(primaries) > 1:
-        raise RuntimeError("Multiple primary candidates detected.")
+    if len(primaries) != 1:
+        errors.append(f"Unable to identify the Primary (candidates: {primaries})")
 
-    PRIMARY = primaries[0] if primaries else None
+    PRIMARY = primaries[0] if len(primaries) == 1 else None
 
     for node, status in statuses.items():
         replica = status["replica"]
 
         print(f"\n[{node}]")
-        print(f"  Role             : {'PRIMARY' if status['is_primary'] else 'REPLICA'}")
+        print(f"  Role             : {Role.PRIMARY if status['is_primary'] else Role.REPLICA}")
         print(f"  Server ID        : {status['server_id']}")
         print(f"  Read Only        : {status['read_only']}")
         print(f"  Super Read Only  : {status['super_read_only']}")

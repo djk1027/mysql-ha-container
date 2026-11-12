@@ -88,7 +88,23 @@ services:
       timeout: 5s
       retries: 30
 
+  # 애플리케이션 접속 지점. 설정은 scripts/setup-proxysql.sh 가 관리 SQL로 넣는다 (비밀번호를 파일에 두지 않기 위해)
+  # 관리 포트(6032)는 외부에 열지 않음: docker exec proxysql mysql -uadmin -padmin -h127.0.0.1 -P6032
+  proxysql:
+    image: proxysql/proxysql:3.0.11
+    container_name: proxysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6033:6033"
+    volumes:
+      - proxysql-data:/var/lib/proxysql
+    depends_on:
+      - mysql-server-1
+      - mysql-server-2
+      - mysql-server-3
+
 volumes:
+  proxysql-data:
   mysql-server-1-data:
   mysql-server-2-data:
   mysql-server-3-data:

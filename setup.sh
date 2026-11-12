@@ -28,6 +28,12 @@ echo "=============================="
 bash scripts/setup-replication.sh
 echo
 
+echo "=============================="
+echo " 5. Configuring ProxySQL"
+echo "=============================="
+bash scripts/setup-proxysql.sh
+echo
+
 echo "------------------------------"
 echo " MySQL HA setup completed! "
 echo "------------------------------"

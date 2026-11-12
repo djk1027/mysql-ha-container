@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pymysql
 
-from apps.common import one, execute, get_node_status, REPL_PASSWORD
+from apps.common import one, execute, collect, find_primary, REPL_PASSWORD
 from apps.common import NODES, PROJECT_ROOT, COMPOSE_FILE
 
 def docker(*args):
@@ -22,20 +22,15 @@ def docker(*args):
     return result.stdout.strip()
 
 
-def find_primary():
-    """현재 Primary를 탐색한다."""
-    primaries = []
+def current_primary():
+    """현재 Primary를 탐색한다. (공통 Primary 식별 + 실제로 쓰기 가능한지 확인)"""
+    statuses, _ = collect()
+    primaries = find_primary(statuses)
 
-    for node in NODES:
-        try:
-            if get_node_status(node)["is_primary"]:
-                primaries.append(node)
-        except pymysql.MySQLError:
-            continue
-
-    if len(primaries) != 1:
+    # Source_Host 합의로만 추정된 Primary(접속 불가/쓰기 불가)에는 재합류할 수 없다
+    if len(primaries) != 1 or not statuses.get(primaries[0], {}).get("is_primary"):
         raise RuntimeError(
-            f"Expected one Primary, found: {primaries}"
+            f"Expected one writable Primary, found: {primaries}"
         )
 
     return primaries[0]
@@ -286,7 +281,7 @@ def rejoin(node):
     # 1. Primary 탐색
     # ---------------------------
     print("[1/6] 현재 Primary를 탐색합니다...")
-    primary = find_primary()
+    primary = current_primary()
     print(f"    [INFO] Primary: {primary}")
 
     if node == primary:
@@ -323,6 +318,8 @@ def rejoin(node):
     verify_rejoin(node, primary, target_gtid)
 
     print(f"\n[OK] Rejoin completed: {node} -> {primary}")
+    
+    return
 
 
 if __name__ == "__main__":
