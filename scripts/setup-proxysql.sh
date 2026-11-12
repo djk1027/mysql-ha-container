@@ -135,6 +135,18 @@ INSERT INTO mysql_users (username, password, default_hostgroup, default_schema)
 VALUES ('app', '${APP_PASSWORD_SQL}', ${WRITER_HG}, '${APP_DB}');
 LOAD MYSQL USERS TO RUNTIME;
 SAVE MYSQL USERS TO DISK;
+
+-- 읽기 분산: 위에서부터 검사, apply=1 이면 거기서 결정
+--   1) 잠금 조회(FOR UPDATE / FOR SHARE)는 Writer
+--   2) 나머지 SELECT는 Reader 그룹 (Primary도 Reader 그룹에 있으므로 3대에 분산)
+--   그 외(INSERT/UPDATE/DELETE/DDL)는 규칙에 안 걸림 → default_hostgroup(Writer)
+-- 트랜잭션 안의 쿼리는 규칙과 관계없이 트랜잭션을 시작한 노드에서 실행됨
+DELETE FROM mysql_query_rules WHERE rule_id IN (1, 2);
+INSERT INTO mysql_query_rules (rule_id, active, match_digest, destination_hostgroup, apply, comment)
+VALUES (1, 1, '^SELECT.*FOR (UPDATE|SHARE)', ${WRITER_HG}, 1, 'locking read -> writer'),
+       (2, 1, '^SELECT',                     ${READER_HG}, 1, 'read -> readers');
+LOAD MYSQL QUERY RULES TO RUNTIME;
+SAVE MYSQL QUERY RULES TO DISK;
 "
 
 echo "[5/5] Verifying..."
@@ -159,9 +171,20 @@ if [[ $writer != "$PRIMARY" ]]; then
     exit 1
 fi
 
-# 애플리케이션 경로(6033)로 실제 접속해 Primary로 가는지 확인
-result=$(docker exec -i -e MYSQL_PWD="$MYSQL_APP_PASSWORD" "$PRIMARY" \
-    mysql -uapp -h"$PROXYSQL" -P6033 -N -B <<< "SELECT @@server_id, @@read_only;")
-echo "  app via ProxySQL -> server_id=$(cut -f1 <<< "$result"), read_only=$(cut -f2 <<< "$result")"
+# 애플리케이션 경로(6033)로 실제 접속해 확인
+app_query() {
+    docker exec -i -e MYSQL_PWD="$MYSQL_APP_PASSWORD" "$PRIMARY" \
+        mysql -uapp -h"$PROXYSQL" -P6033 -N -B <<< "$1"
+}
+# 쓰기 경로: 트랜잭션은 default_hostgroup(Writer)에서 시작하고 끝날 때까지 같은 노드에 머문다
+result=$(app_query "BEGIN; SELECT @@server_id, @@read_only; COMMIT;")
+echo "  app write path -> server_id=$(cut -f1 <<< "$result"), read_only=$(cut -f2 <<< "$result")"
+if [[ $(cut -f2 <<< "$result") != 0 ]]; then
+    echo "[ERROR] write path is not the Primary"
+    exit 1
+fi
+# 읽기 경로: SELECT는 Reader 그룹으로 분산 (접속마다 노드가 달라질 수 있음)
+reads=$(for _ in $(seq 1 12); do app_query "SELECT @@server_id;"; done | sort | uniq -c | awk '{printf "server_id=%s:%s ", $2, $1}')
+echo "  app read path  -> ${reads}"
 
 echo "Proxysql setup completed. (app: 127.0.0.1:6033, user=app, db=${APP_DB})"
