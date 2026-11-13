@@ -21,7 +21,7 @@ import threading
 import time
 
 from apps import events
-from apps.common import NODES, cluster_issues, collect
+from apps.common import NODES, cluster_issues, collect, configuring_nodes, is_busy_issue
 
 log = logging.getLogger("manager")
 
@@ -79,16 +79,29 @@ class Manager:
             events.append(level, message)
 
     def report(self, issues):
-        """상태가 바뀐 이슈만 알린다. (같은 알림 반복 방지)"""
+        """상태가 바뀐 이슈만 알린다. (같은 알림 반복 방지)
+
+        구성 작업(Failover/Rejoin) 중인 노드의 이슈는 일시적인 것이므로 알리지 않는다.
+        작업 전부터 있던 이슈는 그대로 기억해 두고, 작업이 끝난 뒤의 상태와 비교한다.
+          - 작업 후에도 남아 있으면 → 알림 없음 (이미 알렸음)
+          - 작업 후 사라졌으면     → [Recovered]
+          - 작업 중 새로 생겨 작업 후에도 남아 있으면 → 그때 [Triggered]
+        """
+        busy = configuring_nodes()
+
         for key, msg in issues.items():
-            if key not in self.active_issues:
+            if key not in self.active_issues and not is_busy_issue(key, busy):
                 self.emit(logging.WARNING, f"[Triggered] {msg}")
 
         for key, msg in self.active_issues.items():
-            if key not in issues:
+            if key not in issues and not is_busy_issue(key, busy):
                 self.emit(logging.INFO, f"[Recovered] {msg}")
 
-        self.active_issues = issues
+        self.active_issues = {
+            **{k: m for k, m in self.active_issues.items() if is_busy_issue(k, busy)},
+            **{k: m for k, m in issues.items()
+               if not is_busy_issue(k, busy) or k in self.active_issues},
+        }
 
     # ---------- rejoin thread ----------
     def start_rejoin(self, node, new_primary):
@@ -167,6 +180,20 @@ class Manager:
                 self.emit(logging.CRITICAL,
                           f"PRIMARY 장애: {old_primary} ({reason}). "
                           "수동 실행 필요: python -m apps.failover")
+            return
+
+        # rejoin이 진행 중이면 Failover를 보류한다.
+        # 재합류 중인 노드가 반쯤 바뀐 상태에서 Failover가 시작되지 않도록.
+        # Primary가 죽었으므로 rejoin은 곧 실패로 끝나고, 그다음 tick에서 Failover가 진행된다.
+        if self.rejoin_thread and self.rejoin_thread.is_alive():
+            log.warning("Rejoin 진행 중(%s): Failover 보류", self.rejoin_thread.name)
+            return
+
+        # 수동으로 실행한 failover/rejoin 이 진행 중이어도 보류 (state/ops/ 표시 파일로 판단)
+        busy = configuring_nodes()
+        if busy:
+            log.warning("구성 작업 진행 중(%s): Failover 보류",
+                        ", ".join(f"{n}={i['op']}" for n, i in busy.items()))
             return
 
         remaining = self.cooldown - (time.monotonic() - self.last_failover)

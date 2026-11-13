@@ -22,8 +22,8 @@ import pymysql
 
 from apps import events
 from apps.common import (
-    NODES, QUERY_TIMEOUT, Role, cluster_issues, collect, execute, find_primary,
-    node_state, parse_issue_key,
+    NODES, QUERY_TIMEOUT, Role, cluster_issues, collect, configuring_nodes, execute,
+    find_primary, is_busy_issue, node_state, parse_issue_key,
 )
 
 log = logging.getLogger("collector")
@@ -252,7 +252,10 @@ class Collector(threading.Thread):
         primary, issues = cluster_issues(statuses, containers)
 
         now = time.time()
-        self._alert_since = {k: self._alert_since.get(k, now) for k in issues}
+        # 구성 작업(Failover/Rejoin) 중인 노드의 이슈는 일시적이므로 알림에서 뺀다 (노드는 CONFIGURING 표시)
+        busy = configuring_nodes()
+        alert_issues = {k: m for k, m in issues.items() if not is_busy_issue(k, busy)}
+        self._alert_since = {k: self._alert_since.get(k, now) for k in alert_issues}
 
         stats = stats_future.result()
         self.store.set_events(events.recent(EVENTS_LIMIT))
@@ -263,7 +266,8 @@ class Collector(threading.Thread):
                 node, statuses.get(node), containers.get(node),
                 stats.get(node, {}), issues,
             )
-            nodes[node]["state"] = node_state(node, statuses, containers, issues)
+            nodes[node]["state"] = node_state(node, statuses, containers, issues, busy)
+            nodes[node]["configuring"] = busy.get(node)   # {"op", "since"} 또는 None
 
         return {
             "ts": now,
@@ -273,7 +277,7 @@ class Collector(threading.Thread):
             "issues": list(issues.values()),
             "alerts": [
                 {**_alert(k, m, find_primary(statuses)), "since": self._alert_since[k]}
-                for k, m in issues.items()
+                for k, m in alert_issues.items()
             ],
             "nodes": nodes,
         }

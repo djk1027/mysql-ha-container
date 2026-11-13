@@ -22,3 +22,20 @@ MANAGER_OPTS="--auto-failover --threshold 5" ./ha.sh start manager    # 옵션 �
 # 포그라운드 실행 (디버깅용, 종료: Ctrl+C)
 .venv/bin/python -m apps.manager --auto-failover   # HA Manager: 하나만 실행할 것
 .venv/bin/python -m apps.web                       # 웹 대시보드(보기 전용): http://127.0.0.1:8000
+
+# 테스트
+## 전체 한 번 (끝나면 테이블 삭제)
+.venv/bin/python -m tests.load_test
+
+## 가볍게 빨리 확인
+.venv/bin/python -m tests.load_test --rows 10000 --reads 1000
+
+## 데이터는 한 번만 넣고, 조회 조건을 바꿔 가며 반복 측정
+.venv/bin/python -m tests.load_test --only insert --rows 2000000
+.venv/bin/python -m tests.load_test --only select --threads 4
+.venv/bin/python -m tests.load_test --only select --threads 16 --reads 20000
+.venv/bin/python -m tests.load_test --only select --drop
+
+## Ctrl+C 전까지 읽기/쓰기 혼합 부하 (장애조치 중 오류·분산 변화 관찰용, 끊기면 자동 재접속)
+.venv/bin/python -m tests.load_test --only continuous
+.venv/bin/python -m tests.load_test --only continuous --threads 16 --write-ratio 0.3 --interval 2

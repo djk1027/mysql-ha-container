@@ -2,7 +2,7 @@ import time
 import pymysql
 
 from apps.common import one, execute, REPL_PASSWORD
-from apps.common import NODES, Mode, check_container, stop_container, get_node_status, find_primary
+from apps.common import NODES, Mode, check_container, stop_container, get_node_status, find_primary, configuring
 
 # 1. Node들의 Status 세팅 
 def collect_node_statuses():
@@ -588,6 +588,12 @@ def verify_cluster(new_primary, old_primary, candidates, mode):
 #   Main Fail over Logic
 ###########################
 def failover():
+    """Switchover / Failover 실행. 진행하는 동안 모든 노드를 CONFIGURING 으로 표시한다."""
+    with configuring(NODES, "failover"):
+        return _failover()
+
+
+def _failover():
     # ---------------------------
     # 1. Node들의 Status 세팅
     # ---------------------------

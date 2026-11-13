@@ -43,7 +43,12 @@ function colorOf(node) {
 
 // ---------------------------------------------------------------- header
 function renderHeader(snap) {
-  $("#primary-pill").textContent = `Primary: ${snap.primary ?? "식별 불가"}`;
+  // Failover/Switchover 진행 중에는 Primary가 바뀌는 중이므로 회색 "전환 중"으로 표시
+  const switching = Object.values(snap.nodes ?? {}).some((n) => n.configuring?.op === "failover");
+  const pill = $("#primary-pill");
+  pill.textContent = switching ? "Primary: 전환 중" : `Primary: ${snap.primary ?? "식별 불가"}`;
+  pill.classList.toggle("cfg", switching);
+  pill.title = switching ? "Failover/Switchover 진행 중" : "";
   renderFreshness();
 }
 
@@ -142,12 +147,20 @@ function initAlerts() {
 
 // ---------------------------------------------------------------- nodes
 // 서버가 계산한 노드 상태(common.NodeState) → 상태 점 색, 역할 배지
-const STATE_DOT = { OK: "ok", DEGRADED: "warn", REPL_BROKEN: "bad", DOWN: "bad", STOPPED: "bad" };
+const STATE_DOT = { OK: "ok", DEGRADED: "warn", REPL_BROKEN: "bad", DOWN: "bad", STOPPED: "bad", CONFIGURING: "cfg" };
+const OP_LABEL = { failover: "Failover", rejoin: "Rejoin" };
 
 function nodeState(n) {
   // 예전 서버(state 없음)는 접속 여부/이슈로 판단
   const state = n.state ?? (!n.reachable ? "DOWN" : n.issues.length ? "DEGRADED" : "OK");
   const roleCls = n.role === "PRIMARY" ? "primary" : "";
+  // Failover/Rejoin 진행 중: 일시적인 다운/복제 끊김 대신 "구성 중"으로 표시
+  if (state === "CONFIGURING") {
+    const op = OP_LABEL[n.configuring?.op] ?? "구성";
+    const since = n.configuring?.since;
+    const title = `${op} 진행 중` + (since ? ` (${elapsedStr(since).replace("째", "")} 경과)` : "");
+    return { cls: "cfg", role: "CONFIGURING", roleCls: "configuring", state: title, configuring: true };
+  }
   if (!n.reachable) return { cls: STATE_DOT[state] ?? "bad", role: state, roleCls: "down", state };
   return { cls: STATE_DOT[state] ?? "warn", role: n.role, roleCls, state };
 }
@@ -216,11 +229,11 @@ function renderNodes(snap) {
     ` : n.reachable ? `<dt>복제</dt><dd>${n.role === "PRIMARY" ? "Source" : "구성 안 됨"}</dd>` : "";
 
     return `
-      <article class="node ${n.reachable ? "" : "down"}" style="--node-color:${colorOf(name)}">
+      <article class="node ${n.reachable || st.configuring ? "" : "down"}" style="--node-color:${colorOf(name)}">
         <div class="node-head">
           <div class="node-name"><i class="dot ${st.cls}" title="${esc(st.state)}"></i>${esc(name)}
             <span class="muted mono">:${n.port}</span></div>
-          <span class="role ${st.roleCls}">${esc(st.role ?? "-")}</span>
+          <span class="role ${st.roleCls}" title="${esc(st.configuring ? st.state : "")}">${esc(st.role ?? "-")}</span>
         </div>
 
         <div class="node-body">

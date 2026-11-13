@@ -154,9 +154,11 @@ function renderProcesses(snap) {
         : `<span class="muted">-</span>`}</td>
     </tr>`).join("");
 
+  // 행이 없으면 빈 행 대신 표 가운데에 안내 문구 표시
+  const empty = $("#proc-empty");
+  empty.hidden = rows.length > 0;
   if (!rows.length) {
-    html = `<tr><td colspan="${PROC_COLUMNS.length}" class="muted">실행 중인 SQL 없음${
-      showSleep && showSystem ? "" : " (필터로 숨긴 세션 제외)"}</td></tr>`;
+    empty.textContent = `실행 중인 SQL 없음${showSleep && showSystem ? "" : " (필터로 숨긴 세션 제외)"}`;
   }
   if (failed.length) {
     html += `<tr><td colspan="${PROC_COLUMNS.length}" class="no">조회 실패: ${failed.map(esc).join(", ")}</td></tr>`;

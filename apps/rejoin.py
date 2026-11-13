@@ -1,4 +1,3 @@
-
 import argparse
 import json
 import subprocess
@@ -9,7 +8,7 @@ from pathlib import Path
 import pymysql
 
 from apps.common import one, execute, collect, find_primary, REPL_PASSWORD
-from apps.common import NODES, PROJECT_ROOT, COMPOSE_FILE
+from apps.common import NODES, PROJECT_ROOT, COMPOSE_FILE, configuring
 
 def docker(*args):
     """Docker 명령을 실행하고 결과를 반환한다."""
@@ -43,23 +42,36 @@ def start_read_only(node):
     # docker inspect mysql-server-2
     info = json.loads(docker("inspect", node))[0]
 
-    # 2. 중지된 컨테이너인지 확인
+    service = info["Config"]["Labels"].get("com.docker.compose.service")
+    if not service:
+        raise RuntimeError("Cannot identify Compose service.")
+
+    # 2. 이미 실행 중인 경우: 읽기 전용이면 재사용, 쓰기 가능하면 거부
     if info["State"]["Running"]:
+        try:
+            status = one(node, """
+                SELECT @@GLOBAL.read_only AS read_only,
+                       @@GLOBAL.super_read_only AS super_read_only
+            """)
+        except pymysql.MySQLError as exc:
+            raise RuntimeError(f"{node}: Running but MySQL unreachable ({exc}).")
+
+        if status["read_only"] == 1 and status["super_read_only"] == 1:
+            execute(node, "SET PERSIST super_read_only = ON")
+            print(f"    [INFO] {node}: Already running read-only. Resuming.")
+            return service
+
+        # 쓰기 가능한 상태로 떠 있는 노드에 복제를 붙이면 split-brain 위험
         raise RuntimeError(
-            f"{node}: Already running. Safe startup required."
+            f"{node}: Running and writable. Stop it first (docker stop {node})."
         )
-
-    # 3. Compose 서비스 이름과 실행 옵션 추출
-    service = info["Config"]["Labels"].get(
-        "com.docker.compose.service"
-    )
-
+    
+    # 3. 기존 실행 옵션에서 읽기 전용 관련 설정 제거
     command = info["Config"]["Cmd"]
 
     if not service or not isinstance(command, list) or not command:
         raise RuntimeError("Cannot identify Compose service or command.")
 
-    # 4. 기존 실행 옵션에서 읽기 전용 관련 설정 제거
     safe_command = [
         arg for arg in command
         if not arg.startswith((
@@ -69,14 +81,14 @@ def start_read_only(node):
         ))
     ]
 
-    # 5. 안전한 기동 옵션 추가
+    # 4. 안전한 기동 옵션 추가
     safe_command += [
         "--persisted-globals-load=OFF",
         "--read-only=ON",
         "--super-read-only=ON"
     ]
 
-    # 6. 임시 Compose 설정 파일 생성
+    # 5. 임시 Compose 설정 파일 생성
     override = {
         "services": {
             service: {
@@ -97,7 +109,7 @@ def start_read_only(node):
         override_file = Path(f.name)
 
     try:
-        # 7. 컨테이너 재생성 및 기동
+        # 6. 컨테이너 재생성 및 기동
         docker(
             "compose",
             "-f", str(COMPOSE_FILE),
@@ -110,10 +122,10 @@ def start_read_only(node):
             service
         )
     finally:
-        # 8. 임시 파일 삭제
+        # 7. 임시 파일 삭제
         override_file.unlink(missing_ok=True)
 
-    # 9. 실제 읽기 전용 상태 검증
+    # 8. 실제 읽기 전용 상태 검증
     status = one(
         node,
         """
@@ -126,7 +138,7 @@ def start_read_only(node):
     if status["read_only"] != 1 or status["super_read_only"] != 1:
         raise RuntimeError(f"{node}: Read-only startup failed.")
     
-    # 10. 재시작 후에도 읽기 전용 유지
+    # 9. 재시작 후에도 읽기 전용 유지
     execute(node, "SET PERSIST super_read_only = ON")
 
     print(f"    [OK] Started safely: {node}")
@@ -274,8 +286,15 @@ def restore_compose_settings(node, service):
 #   Main Rejoin Logic
 ###########################
 def rejoin(node):
+    """노드를 현재 Primary의 Replica로 재합류시킨다. 진행하는 동안 그 노드를 CONFIGURING 으로 표시한다."""
     if node not in NODES:
         raise RuntimeError(f"Unknown node: {node}")
+
+    with configuring([node], "rejoin"):
+        return _rejoin(node)
+
+
+def _rejoin(node):
 
     # ---------------------------
     # 1. Primary 탐색
@@ -290,7 +309,7 @@ def rejoin(node):
     # ---------------------------
     # 2. 임시 읽기 전용 기동
     # ---------------------------
-    print("[2/6] Old Primary를 Read only로 기동합니다...")
+    print("[2/6] 노드를 Read only로 기동합니다...")
     service = start_read_only(node)
     
     # ---------------------------

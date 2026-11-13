@@ -10,11 +10,15 @@
 단계만 따로 실행할 수 있다 (테이블은 남겨 둠, --drop 을 주면 정리):
   --only insert   1~3 (스키마 생성 + INSERT + 복제 대기)
   --only select   4   (남아 있는 테이블로 조회만, 같은 데이터로 조건을 바꿔 반복 측정할 때)
+  --only continuous   Ctrl+C 전까지 읽기/쓰기 혼합 부하를 계속 준다 (장애조치 중 동작 확인용)
+                      연결이 끊기면 재접속하며, --interval 초마다 처리량·오류·노드별 분산을 출력.
+                      테이블이 없으면 먼저 생성+INSERT 한다.
 
 노드별 분산은 단계별 ProxySQL stats_mysql_connection_pool 의 노드별 Queries 증가량으로 본다.
 (조회에 @@server_id 같은 변수를 넣으면 ProxySQL이 그 세션을 한 노드에 고정해 분산이 안 되므로 쓰지 않음)
 
-실행: .venv/bin/python -m tests.load_test [--only insert|select] [--rows 100000] [--reads 5000] [--threads 8]
+실행: .venv/bin/python -m tests.load_test [--only insert|select|continuous] [--rows 100000] [--reads 5000] [--threads 8]
+     .venv/bin/python -m tests.load_test --only continuous --threads 8 --write-ratio 0.2 --interval 5
 """
 
 import argparse
@@ -42,7 +46,7 @@ WRITER_HG, READER_HG = 10, 20
 
 
 # ---------------------------------------------------------------- 접속
-def proxy_conn(autocommit=False):
+def proxy_conn(autocommit=False, read_timeout=60):
     """애플리케이션과 같은 경로: ProxySQL(6033)로 app 계정 접속.
 
     autocommit=False 면 첫 쿼리부터 트랜잭션이 열려, ProxySQL이 그 세션을 한 노드에 고정한다.
@@ -50,7 +54,7 @@ def proxy_conn(autocommit=False):
     """
     return pymysql.connect(
         host=PROXY_HOST, port=PROXY_PORT, user=APP_USER, password=APP_PASSWORD,
-        database=APP_DB, autocommit=autocommit, connect_timeout=5, read_timeout=60,
+        database=APP_DB, autocommit=autocommit, connect_timeout=5, read_timeout=read_timeout,
     )
 
 
@@ -193,6 +197,145 @@ def bulk_read(reads, threads, users):
     return by_kind, errors[0]
 
 
+# ---------------------------------------------------------------- 4'. 지속 부하
+class LoadStats:
+    """스레드들이 함께 쓰는 성공/오류 카운터. take() 는 구간 값을 돌려주고 비운다."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ok, self.err = Counter(), Counter()
+        self.total_ok, self.total_err = Counter(), Counter()
+
+    def add_ok(self, kind):
+        with self.lock:
+            self.ok[kind] += 1
+
+    def add_err(self, exc):
+        code = exc.args[0] if exc.args else "?"
+        msg = str(exc.args[1]) if len(exc.args) > 1 else str(exc)
+        with self.lock:
+            self.err[f"{type(exc).__name__}({code}) {msg[:60]}"] += 1
+
+    def take(self):
+        with self.lock:
+            ok, err = self.ok, self.err
+            self.ok, self.err = Counter(), Counter()
+            self.total_ok.update(ok)
+            self.total_err.update(err)
+        return ok, err
+
+
+def continuous_worker(idx, users, write_ratio, stop, stats):
+    """stop 이 설정될 때까지 쿼리를 반복. 오류가 나면 연결을 버리고 재접속한다."""
+    rnd = random.Random(2000 + idx)
+    insert_sql = f"INSERT INTO `{TABLE}` (user_id, name, amount) VALUES (%s, %s, %s)"
+    conn = None
+    while not stop.is_set():
+        try:
+            if conn is None:
+                conn = proxy_conn(autocommit=True, read_timeout=10)
+            with conn.cursor() as cur:
+                if rnd.random() < write_ratio:
+                    kind = "write"
+                    cur.execute(insert_sql, (rnd.randint(1, users), f"cont-{idx}",
+                                             round(rnd.uniform(1, 10000), 2)))
+                else:
+                    kind, sql, args = rnd.choice(READ_QUERIES)
+                    cur.execute(sql, args(rnd, users))
+                    cur.fetchall()
+            stats.add_ok(kind)
+        except pymysql.MySQLError as exc:
+            stats.add_err(exc)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+            stop.wait(0.5)   # 장애 중 재접속 폭주 방지
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def safe_pool_queries():
+    try:
+        return pool_queries()
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return None
+
+
+def format_pool_delta(before, after):
+    """'host:W=12,R=34' 형태의 한 줄 요약."""
+    if before is None or after is None:
+        return "ProxySQL 통계 조회 실패"
+    per_host = {}
+    for key in sorted(set(before) | set(after)):
+        d = after.get(key, 0) - before.get(key, 0)
+        if d:
+            hg, host = key
+            role = {WRITER_HG: "W", READER_HG: "R"}.get(hg, f"HG{hg}")
+            per_host.setdefault(host, []).append(f"{role}={d:,}")
+    return "  ".join(f"{h}:{','.join(v)}" for h, v in per_host.items()) or "-"
+
+
+def run_continuous(args):
+    """Ctrl+C 전까지 읽기/쓰기 혼합 부하. 오류 없이 끝났는지를 돌려준다."""
+    print(f"\n[지속 부하] 스레드 {args.threads}, 쓰기 비율 {args.write_ratio:.0%}, "
+          f"{args.interval}초마다 출력 (중단: Ctrl+C)")
+    stop, stats = threading.Event(), LoadStats()
+    workers = [
+        threading.Thread(target=continuous_worker, daemon=True,
+                         args=(i, args.users, args.write_ratio, stop, stats))
+        for i in range(args.threads)
+    ]
+    start = time.monotonic()
+    first_pool = prev_pool = safe_pool_queries()
+    for w in workers:
+        w.start()
+
+    last = start
+    try:
+        while True:
+            time.sleep(args.interval)
+            ok, err = stats.take()
+            now = time.monotonic()
+            pool = safe_pool_queries()
+            span = now - last
+            reads = sum(v for k, v in ok.items() if k != "write")
+            writes = ok["write"]
+            print(f"  [{time.strftime('%H:%M:%S')}] {(reads + writes) / span:>8,.0f} qps "
+                  f"(R {reads / span:,.0f} / W {writes / span:,.0f})  오류 {sum(err.values()):,}"
+                  f"  | {format_pool_delta(prev_pool, pool)}")
+            for msg, n in err.most_common(3):
+                print(f"      ! {n:,} × {msg}")
+            if pool is not None:
+                prev_pool = pool
+            last = now
+    except KeyboardInterrupt:
+        print("\n  중단 요청 → 스레드 종료 대기")
+    finally:
+        stop.set()
+        for w in workers:
+            w.join(timeout=15)
+
+    stats.take()   # 마지막 구간 반영
+    elapsed = time.monotonic() - start
+    total_ok, total_err = stats.total_ok, stats.total_err
+    n_ok = sum(total_ok.values())
+    print(f"\n[지속 부하 요약] {elapsed:,.1f}초, 성공 {n_ok:,}건 ({n_ok / elapsed:,.0f} qps), "
+          f"오류 {sum(total_err.values()):,}건")
+    print("    쿼리 종류: " + ", ".join(f"{k}={v:,}" for k, v in sorted(total_ok.items())))
+    for msg, n in total_err.most_common(5):
+        print(f"    오류 {n:,} × {msg}")
+    final_pool = safe_pool_queries()
+    if first_pool is not None and final_pool is not None:
+        print_pool_delta("지속 부하", first_pool, final_pool)
+    return not total_err
+
+
 def table_info():
     """기존 테이블의 (최대 id, 최대 user_id, 건수). 테이블이 없으면 None."""
     try:
@@ -254,13 +397,17 @@ def run_select(args):
 def main():
     global ROWS
     parser = argparse.ArgumentParser(description="ProxySQL 경유 대용량 INSERT/SELECT 분산 테스트")
-    parser.add_argument("--only", choices=["insert", "select"],
-                        help="한 단계만 실행 (insert: 생성+INSERT, select: 기존 테이블 조회). 테이블은 남김")
-    parser.add_argument("--rows", type=int, default=100_000, help="INSERT 건수")
-    parser.add_argument("--batch", type=int, default=1_000, help="INSERT 배치 크기 (배치마다 commit)")
-    parser.add_argument("--reads", type=int, default=5_000, help="SELECT 횟수")
+    parser.add_argument("--only", choices=["insert", "select", "continuous"],
+                        help="한 단계만 실행 (insert: 생성+INSERT, select: 기존 테이블 조회, "
+                             "continuous: Ctrl+C 전까지 읽기/쓰기 부하). 테이블은 남김")
+    parser.add_argument("--rows", type=int, default=1_000_000, help="INSERT 건수")
+    parser.add_argument("--batch", type=int, default=10_000, help="INSERT 배치 크기 (배치마다 commit)")
+    parser.add_argument("--reads", type=int, default=10_000, help="SELECT 횟수")
     parser.add_argument("--threads", type=int, default=8, help="SELECT 동시 실행 스레드 수")
     parser.add_argument("--users", type=int, default=1_000, help="user_id 범위 (인덱스 조회용)")
+    parser.add_argument("--write-ratio", type=float, default=0.2,
+                        help="continuous: 전체 쿼리 중 INSERT 비율 (0~1)")
+    parser.add_argument("--interval", type=float, default=5, help="continuous: 통계 출력 주기(초)")
     cleanup = parser.add_mutually_exclusive_group()
     cleanup.add_argument("--keep", action="store_true", help="종료 후 테이블을 지우지 않음")
     cleanup.add_argument("--drop", action="store_true", help="종료 후 테이블을 지움 (--only 에서도)")
@@ -272,7 +419,20 @@ def main():
     print(f"ProxySQL {PROXY_HOST}:{PROXY_PORT} (user={APP_USER}, db={APP_DB}, table={TABLE})")
     print_routing()
 
-    if args.only == "select":
+    if not 0 <= args.write_ratio <= 1:
+        parser.error("--write-ratio 는 0~1 사이여야 합니다")
+
+    need_insert = args.only != "select"
+    if args.only == "continuous":
+        info = table_info()
+        if info is None or not info[2]:
+            print(f"\n[기존 테이블 없음] {APP_DB}.{TABLE} 를 먼저 생성+INSERT ({args.rows:,}건)")
+            ROWS = args.rows
+        else:
+            need_insert = False
+            ROWS, args.users = info[0], info[1]
+            print(f"\n[기존 테이블] {APP_DB}.{TABLE} {info[2]:,}건 사용")
+    elif args.only == "select":
         info = table_info()
         if info is None or not info[2]:
             print(f"\n[ERROR] {APP_DB}.{TABLE} 테이블이 없거나 비어 있습니다."
@@ -285,10 +445,12 @@ def main():
 
     ok = True
     try:
-        if args.only != "select":
+        if need_insert:
             ok &= run_insert(args)
 
-        if args.only != "insert":
+        if args.only == "continuous":
+            ok &= run_continuous(args)
+        elif args.only != "insert":
             ok &= run_select(args)
     except Exception as exc:
         ok = False

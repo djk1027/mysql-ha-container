@@ -1,4 +1,6 @@
 import json
+import time
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 
@@ -39,6 +41,7 @@ class NodeState(StrEnum):
     REPL_BROKEN = "REPL_BROKEN"   # 접속은 되지만 복제가 중단/미구성
     DOWN = "DOWN"                 # MySQL 접속 불가 (컨테이너 실행 중 또는 확인 불가)
     STOPPED = "STOPPED"           # 컨테이너 중지됨 (Fencing 포함)
+    CONFIGURING = "CONFIGURING"   # Failover/Rejoin이 노드를 변경 중 (일시적인 다운/복제 끊김은 정상)
 
 
 class Severity(StrEnum):
@@ -186,8 +189,10 @@ def get_node_status(node, read_timeout=45):
 QUERY_TIMEOUT = 3
 _REPL_BROKEN_ISSUES = {IssueKind.IO_STOPPED, IssueKind.SQL_STOPPED, IssueKind.NO_REPLICATION}
 
-def node_state(node, statuses, containers, issues):
-    """수집 결과(collect, cluster_issues)로 노드 상태를 계산한다."""
+def node_state(node, statuses, containers, issues, busy=()):
+    """수집 결과(collect, cluster_issues)로 노드 상태를 계산한다. busy: configuring_nodes() 결과"""
+    if node in busy:
+        return NodeState.CONFIGURING
     if node not in statuses:
         return NodeState.STOPPED if containers.get(node) is False else NodeState.DOWN
 
@@ -311,3 +316,68 @@ def check_issues(statuses, containers, primary):
                 issues[issue_key(IssueKind.LAG, node)] = f"{node}: Primary보다 GTID 지연 {behind}"
 
     return issues
+
+
+#-------------------
+# 구성 작업 표시 (Failover / Rejoin 진행 중)
+#-------------------
+# 작업 중인 노드마다 state/ops/<node>.json 을 남긴다. 대시보드와 Manager가 읽어서
+# 그 노드를 CONFIGURING 으로 표시하고, 작업 중 생기는 일시적인 이상은 알리지 않는다.
+# 수동 실행(python -m apps.failover / apps.rejoin)에도 똑같이 적용된다.
+OPS_DIR = PROJECT_ROOT / "state" / "ops"
+OPS_MAX_AGE = 30 * 60   # 이보다 오래된 표시는 비정상 종료로 남은 것으로 보고 무시
+
+
+@contextmanager
+def configuring(nodes, op):
+    """with 블록 동안 nodes 를 CONFIGURING 으로 표시한다. (예외가 나도 표시는 지워짐)"""
+    OPS_DIR.mkdir(parents=True, exist_ok=True)
+    info = json.dumps({"op": op, "pid": os.getpid(), "since": time.time()})
+    marked = []
+    try:
+        for node in nodes:
+            path = OPS_DIR / f"{node}.json"
+            path.write_text(info, encoding="utf-8")
+            marked.append(path)
+        yield
+    finally:
+        for path in marked:
+            path.unlink(missing_ok=True)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:   # 다른 사용자 프로세스: 살아 있음
+        pass
+    return True
+
+
+def configuring_nodes():
+    """{node: {"op": "failover"|"rejoin", "since": ts}}. 작업 프로세스가 죽었거나 오래된 표시는 지운다."""
+    busy = {}
+    if not OPS_DIR.is_dir():
+        return busy
+    for path in OPS_DIR.glob("*.json"):
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue   # 쓰는 중이거나 방금 지워진 파일
+        if not _pid_alive(info.get("pid", -1)) or time.time() - info.get("since", 0) > OPS_MAX_AGE:
+            path.unlink(missing_ok=True)
+            continue
+        busy[path.stem] = {"op": info.get("op"), "since": info.get("since")}
+    return busy
+
+
+def issue_nodes(key):
+    """이슈와 관련된 노드. 클러스터 전체 이슈(split, primary)는 모든 노드"""
+    _, node = parse_issue_key(key)
+    return [node] if node else list(NODES)
+
+
+def is_busy_issue(key, busy):
+    """관련 노드가 모두 구성 작업 중이면 True (작업 중 일시적인 이상으로 보고 알리지 않음)"""
+    return bool(busy) and all(n in busy for n in issue_nodes(key))

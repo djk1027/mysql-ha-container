@@ -77,6 +77,9 @@ h2 { font-size: 14px; }
 .dot.ok { background: var(--ok); }
 .dot.warn { background: var(--warn); }
 .dot.bad { background: var(--bad); }
+.pill.cfg { color: var(--muted); border-style: dashed; }
+.dot.cfg { background: var(--muted); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
 
 .icon-btn {
   display: inline-grid; place-items: center; width: 30px; height: 30px;
@@ -151,6 +154,7 @@ main > * { min-width: 0; }
 }
 .role.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .role.down { background: var(--bad); border-color: var(--bad); color: #fff; }
+.role.configuring { border-color: var(--muted); color: var(--muted); }
 
 .node-body { display: grid; grid-template-columns: auto auto 1fr; gap: 12px; align-items: start; }
 .metrics { display: grid; grid-template-columns: 1fr; gap: 8px; }
@@ -216,7 +220,18 @@ main > * { min-width: 0; }
   font: inherit; color: var(--text); background: var(--card);
   border: 1px solid var(--border); border-radius: 3px; padding: 3px 6px;
 }
-.table-wrap { overflow: auto; max-height: 380px; border: 1px solid var(--grid); border-radius: 4px; }
+/* 비어 있어도 6행 정도 높이 유지 */
+.table-wrap {
+  position: relative; overflow: auto; min-height: 220px; max-height: 380px;
+  border: 1px solid var(--grid); border-radius: 4px;
+}
+/* 행이 없을 때 안내 문구: 헤더 아래 영역의 가운데 */
+.proc-empty {
+  position: absolute; inset: 31px 0 0 0;
+  display: grid; place-items: center;
+  color: var(--muted); font-size: 13px; pointer-events: none;
+}
+.proc-empty[hidden] { display: none; }
 .proc { table-layout: fixed; min-width: 100%; border-collapse: collapse; font-size: 12px; }
 .proc th {
   position: sticky; top: 0; z-index: 1; background: var(--card);
